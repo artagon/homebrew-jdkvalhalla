@@ -1,0 +1,218 @@
+name: Build Valhalla bottle
+
+on:
+  workflow_dispatch:
+    inputs:
+      formula:
+        description: Versioned formula to build
+        required: true
+        type: choice
+        options:
+          - openjdk-valhalla@27
+          - openjdk-valhalla@28
+
+permissions: {}
+
+concurrency:
+  group: bottle-${{ inputs.formula }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-14
+    permissions:
+      contents: read
+    env:
+      FORMULA: ${{ inputs.formula }}
+      TAP: artagon/jdkvalhalla
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@b2a302b9a642580cae998e6ba2076ffd28e61317 # v5
+
+      - name: Verify Apple Silicon runner
+        run: |
+          set -Eeuo pipefail
+          [[ "$(uname -m)" == "arm64" ]] || {
+            printf 'Expected an arm64 runner, got %s\n' "$(uname -m)" >&2
+            exit 1
+          }
+
+      - name: Tap this checkout
+        run: |
+          set -Eeuo pipefail
+          brew untap "${TAP}" >/dev/null 2>&1 || true
+          brew tap --custom-remote "${TAP}" "${GITHUB_WORKSPACE}"
+
+      - name: Resolve bottle metadata
+        id: metadata
+        run: |
+          set -Eeuo pipefail
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]] || {
+            printf 'Bottle builds must be dispatched from main, got %s\n' "${GITHUB_REF}" >&2
+            exit 1
+          }
+          info_file="$(mktemp)"
+          trap 'rm -f -- "${info_file}"' EXIT
+          brew info --json=v2 "${TAP}/${FORMULA}" >"${info_file}"
+          version="$(ruby -rjson -e \
+            'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("formulae").first.fetch("versions").fetch("stable")' \
+            "${info_file}")"
+          [[ "${version}" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] || {
+            printf 'Unsafe formula version: %s\n' "${version}" >&2
+            exit 1
+          }
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
+            printf 'Invalid GitHub commit SHA\n' >&2
+            exit 1
+          }
+          safe_formula="${FORMULA//@/-}"
+          tag="bottle-${safe_formula}-${version}-${GITHUB_SHA::12}"
+          {
+            printf 'tag=%s\n' "${tag}"
+            printf 'version=%s\n' "${version}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Build from the pinned source
+        run: |
+          set -Eeuo pipefail
+          brew install --build-bottle --build-from-source "${TAP}/${FORMULA}"
+
+      - name: Run formula smoke test
+        run: brew test "${TAP}/${FORMULA}"
+
+      - name: Create bottle and metadata
+        env:
+          BOTTLE_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          set -Eeuo pipefail
+          root_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${BOTTLE_TAG}"
+          mkdir -p bottle-output
+          cd bottle-output
+          brew bottle --json --root-url="${root_url}" "${TAP}/${FORMULA}"
+
+      - name: Validate bottle artifact
+        id: artifact
+        env:
+          BOTTLE_TAG: ${{ steps.metadata.outputs.tag }}
+          BOTTLE_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          root_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${BOTTLE_TAG}"
+          ruby scripts/validate-bottle-artifact.rb \
+            --directory bottle-output \
+            --formula "${FORMULA}" \
+            --tap "${TAP}" \
+            --version "${BOTTLE_VERSION}" \
+            --git-revision "${GITHUB_SHA}" \
+            --root-url "${root_url}" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Upload bottle job artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.metadata.outputs.tag }}
+          path: |-
+            ${{ steps.artifact.outputs.bottle_path }}
+            ${{ steps.artifact.outputs.json_path }}
+          if-no-files-found: error
+          retention-days: 7
+
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      version: ${{ steps.metadata.outputs.version }}
+
+  publish:
+    needs: build
+    runs-on: macos-14
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      FORMULA: ${{ inputs.formula }}
+      TAP: artagon/jdkvalhalla
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@b2a302b9a642580cae998e6ba2076ffd28e61317 # v5
+
+      - name: Download bottle job artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.build.outputs.tag }}
+          path: bottle-artifact
+
+      - name: Validate bottle artifact
+        id: artifact
+        env:
+          BOTTLE_TAG: ${{ needs.build.outputs.tag }}
+          BOTTLE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          root_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${BOTTLE_TAG}"
+          ruby scripts/validate-bottle-artifact.rb \
+            --directory bottle-artifact \
+            --formula "${FORMULA}" \
+            --tap "${TAP}" \
+            --version "${BOTTLE_VERSION}" \
+            --git-revision "${GITHUB_SHA}" \
+            --root-url "${root_url}" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Publish bottle release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOTTLE_PATH: ${{ steps.artifact.outputs.bottle_path }}
+          BOTTLE_TAG: ${{ needs.build.outputs.tag }}
+          BOTTLE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/${BOTTLE_TAG}" \
+            -f sha="${GITHUB_SHA}"
+          gh release create "${BOTTLE_TAG}" "${BOTTLE_PATH}" \
+            --target "${GITHUB_SHA}" \
+            --verify-tag \
+            --prerelease \
+            --title "${FORMULA} ${BOTTLE_VERSION} bottle" \
+            --notes "Artagon Homebrew bottle built from the source pinned by Formula/${FORMULA}.rb."
+
+      - name: Merge bottle metadata into formula
+        env:
+          BOTTLE_JSON: ${{ steps.artifact.outputs.json_path }}
+        run: |
+          set -Eeuo pipefail
+          brew untap "${TAP}" >/dev/null 2>&1 || true
+          brew tap --custom-remote "${TAP}" "${GITHUB_WORKSPACE}"
+          tap_root="$(brew --repository "${TAP}")"
+          brew bottle --merge --write --no-commit "${BOTTLE_JSON}"
+          cp "${tap_root}/Formula/${FORMULA}.rb" "Formula/${FORMULA}.rb"
+
+      - name: Create bottle block pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ github.token }}
+          commit-message: >-
+            chore(formula): add ${{ inputs.formula }}
+            ${{ needs.build.outputs.version }} bottle
+          title: >-
+            chore(formula): add ${{ inputs.formula }}
+            ${{ needs.build.outputs.version }} bottle
+          body: |
+            Adds the Homebrew-generated bottle block for `${{ inputs.formula }}`
+            version `${{ needs.build.outputs.version }}`.
+
+            The bottle was built from the formula's pinned source, smoke-tested,
+            and published in release `${{ needs.build.outputs.tag }}`.
+          branch: bottle/${{ needs.build.outputs.tag }}
+          delete-branch: true
+          add-paths: Formula/${{ inputs.formula }}.rb
