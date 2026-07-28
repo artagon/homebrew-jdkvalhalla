@@ -70,7 +70,7 @@ The canonical repository owns:
 
 - all supported Valhalla prebuilt casks and formulas;
 - all supported Valhalla source formulas and bottles;
-- update, validation, and bottle release workflows;
+- update, validation, and bottle package workflows;
 - install instructions, version selection, and `jenv` integration;
 - security tests for workflow permissions, action pinning, required-check
   aggregation, and release artifact validation.
@@ -111,9 +111,11 @@ Bottle publication is split into two trust zones:
 1. A read-only build job checks out the exact triggering commit, builds the
    formula, and emits bottle files plus metadata.
 2. A publication job validates the exact artifact set and metadata before it
-   receives write permission. It creates an atomic tag at `GITHUB_SHA`, verifies
-   that tag, rejects an existing tag or release, and uploads without clobbering
-   existing assets.
+   receives write permission. It uploads through Homebrew's GitHub Container
+   Registry client, which rejects an existing package version unless an
+   explicit overwrite-preserving mode is requested. The workflow never enables
+   that mode. GHCR avoids GitHub Release asset renaming for versioned formula
+   names containing `@`, and Homebrew resolves installs by OCI digest.
 
 The validator rejects missing, extra, duplicate, ambiguously named, or
 checksum-mismatched artifacts. Upload and download actions are pinned to full
@@ -257,7 +259,7 @@ validation workflow succeeds.
   GitHub-hosted runners. Unsupported matrix entries must be documented rather
   than implied.
 - Source builds are expensive. Migration CI validates definitions and controls,
-  while release workflows supply the durable full-build evidence.
+  while bottle workflows supply the durable full-build evidence.
 - A single-maintainer repository cannot satisfy a required independent approval
   without another reviewer. The owner merge choreography is therefore explicit,
   narrow, and followed by stronger final enforcement.

@@ -51,7 +51,7 @@
 - Create `tests/workflow_security_test.rb`: workflow permissions, action pins,
   artifact binding, and aggregation tests.
 - Create `.github/workflows/bottles.yml`: manual source build and immutable
-  bottle publication.
+  GHCR bottle publication.
 - Modify `.github/workflows/validate.yml`: read-only, fail-closed validation and
   prebuilt installation matrix.
 - Modify `.github/workflows/update.yml`: read-only preparation followed by a
@@ -61,7 +61,7 @@
 - Modify `.github/workflows/codeql.yml`: current immutable checkout and CodeQL
   actions.
 - Delete `.github/workflows/release.yml`: remove the unused prebuilt GitHub
-  release workflow; bottle releases are owned by `bottles.yml`.
+  release workflow; bottle packages are owned by `bottles.yml`.
 - Modify `scripts/test.sh`: include all static tests and all supported package
   files without forcing source builds.
 
@@ -228,7 +228,7 @@ then set:
 
 ```ruby
 TAP = "artagon/jdkvalhalla"
-ROOT_URL = "https://github.com/artagon/homebrew-jdkvalhalla/releases/download/bottle-openjdk-valhalla-28-test"
+ROOT_URL = "https://ghcr.io/v2/artagon/jdkvalhalla"
 ```
 
 Keep the valid-artifact, extra-bottle, wrong-revision, and checksum-mismatch
@@ -283,9 +283,10 @@ fail_validation("expected exactly one bottle archive, found #{bottle_paths.lengt
 fail_validation("expected exactly one bottle JSON, found #{json_paths.length}") unless json_paths.one?
 ```
 
-Require an HTTPS `github.com` root URL with no userinfo, query, or fragment.
+Require the exact canonical GHCR root URL derived from the tap name.
 Require exact tap/formula name, version, formula path, Git revision, root URL,
-single ARM64 tag, local filename, decoded remote filename, and SHA-256.
+single ARM64 tag, Homebrew-derived local and encoded remote filenames, and
+SHA-256.
 Reject symlinks. Write only real paths to the GitHub output file with mode
 `0600`.
 
@@ -316,9 +317,9 @@ rtk git commit -m "feat(scripts): validate exact bottle artifacts"
 **Interfaces:**
 - Consumes: workflow input `formula`, restricted to
   `openjdk-valhalla@27` or `openjdk-valhalla@28`.
-- Produces: an immutable prerelease tagged
-  `bottle-<formula>-<version>-<12-char-main-SHA>` and a pull request containing
-  only `Formula/<formula>.rb`.
+- Produces: an immutable GHCR bottle package plus a pull request containing only
+  `Formula/<formula>.rb`. The temporary workflow artifact is named
+  `bottle-<formula>-<version>-<12-char-main-SHA>`.
 
 - [ ] **Step 1: Write workflow security tests**
 
@@ -329,7 +330,7 @@ For `bottles.yml`, assert:
 assert_equal({}, document["permissions"])
 assert_equal({ "contents" => "read" }, build["permissions"])
 assert_equal(
-  { "contents" => "write", "pull-requests" => "write" },
+  { "contents" => "write", "packages" => "write", "pull-requests" => "write" },
   publish["permissions"],
 )
 assert checkout_steps(document).all? {
@@ -340,12 +341,12 @@ assert checkout_steps(document).all? {
 Also assert that:
 
 - build verifies `refs/heads/main`;
-- tag text contains `${GITHUB_SHA::12}`;
-- publication creates a Git ref at `${GITHUB_SHA}` before the release;
-- `gh release create` uses `--target "${GITHUB_SHA}"` and `--verify-tag`;
-- no command contains `--clobber`;
+- artifact text contains `${GITHUB_SHA::12}`;
+- publication runs only for `refs/heads/main`;
+- publication uses `brew pr-upload --upload-only`;
+- no command enables `--keep-old` or `--warn-on-upload-failure`;
 - upload paths come only from validator outputs;
-- release and merge steps use validator outputs, not globs or `find`;
+- package and merge steps use validator outputs, not globs or `find`;
 - all action references match `\A[^@\s]+@[0-9a-f]{40}\z`.
 
 - [ ] **Step 2: Run the workflow test and verify it fails**
@@ -370,8 +371,9 @@ env:
 
 Use the exact action revisions from this plan. Keep `permissions: {}` at the
 workflow level, `contents: read` on `build`, and `contents: write` plus
-`pull-requests: write` only on `publish`. Keep `GH_TOKEN` scoped to the release
-step. Keep the exact validator call in both trust zones.
+`packages: write` and `pull-requests: write` only on `publish`. Scope
+`HOMEBREW_GITHUB_PACKAGES_TOKEN` to the package step. Keep the exact validator
+call in both trust zones.
 
 - [ ] **Step 4: Validate the workflow**
 
@@ -388,7 +390,7 @@ Expected: PASS.
 
 ```bash
 rtk git add .github/workflows/bottles.yml tests/workflow_security_test.rb
-rtk git commit -m "ci(workflow): add immutable Valhalla bottle publication"
+rtk git commit -m "ci(workflow): publish immutable Valhalla bottle packages"
 ```
 
 ### Task 4: Make pull-request validation read-only and fail-closed
@@ -650,7 +652,7 @@ rtk git commit -m "ci(workflow): isolate prebuilt update permissions"
 
 **Interfaces:**
 - Consumes: exact reviewed action revisions in this plan.
-- Produces: read-only audit and CodeQL workflows; bottle releases are the only
+- Produces: read-only audit and CodeQL workflows; bottle packages are the only
   repository-owned release path.
 
 - [ ] **Step 1: Add policy assertions**

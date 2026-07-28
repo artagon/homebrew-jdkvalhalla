@@ -58,9 +58,12 @@ jobs:
           info_file="$(mktemp)"
           trap 'rm -f -- "${info_file}"' EXIT
           brew info --json=v2 "${TAP}/${FORMULA}" >"${info_file}"
-          version="$(ruby -rjson -e \
-            'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("formulae").first.fetch("versions").fetch("stable")' \
-            "${info_file}")"
+          version="$(ruby -rjson -e '
+            formula = JSON.parse(File.read(ARGV.fetch(0))).fetch("formulae").first
+            version = formula.fetch("versions").fetch("stable")
+            revision = Integer(formula.fetch("revision", 0))
+            puts revision.positive? ? "#{version}_#{revision}" : version
+          ' "${info_file}")"
           [[ "${version}" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] || {
             printf 'Unsafe formula version: %s\n' "${version}" >&2
             exit 1
@@ -70,26 +73,24 @@ jobs:
             exit 1
           }
           safe_formula="${FORMULA//@/-}"
-          tag="bottle-${safe_formula}-${version}-${GITHUB_SHA::12}"
+          artifact_name="bottle-${safe_formula}-${version}-${GITHUB_SHA::12}"
           {
-            printf 'tag=%s\n' "${tag}"
+            printf 'artifact_name=%s\n' "${artifact_name}"
             printf 'version=%s\n' "${version}"
           } >>"${GITHUB_OUTPUT}"
 
       - name: Build from the pinned source
         run: |
           set -Eeuo pipefail
-          brew install --build-bottle --build-from-source "${TAP}/${FORMULA}"
+          brew install --build-bottle "${TAP}/${FORMULA}"
 
       - name: Run formula smoke test
         run: brew test "${TAP}/${FORMULA}"
 
       - name: Create bottle and metadata
-        env:
-          BOTTLE_TAG: ${{ steps.metadata.outputs.tag }}
         run: |
           set -Eeuo pipefail
-          root_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${BOTTLE_TAG}"
+          root_url="https://ghcr.io/v2/${TAP}"
           mkdir -p bottle-output
           cd bottle-output
           brew bottle --json --root-url="${root_url}" "${TAP}/${FORMULA}"
@@ -97,11 +98,10 @@ jobs:
       - name: Validate bottle artifact
         id: artifact
         env:
-          BOTTLE_TAG: ${{ steps.metadata.outputs.tag }}
           BOTTLE_VERSION: ${{ steps.metadata.outputs.version }}
         run: |
           set -Eeuo pipefail
-          root_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${BOTTLE_TAG}"
+          root_url="https://ghcr.io/v2/${TAP}"
           ruby scripts/validate-bottle-artifact.rb \
             --directory bottle-output \
             --formula "${FORMULA}" \
@@ -114,7 +114,7 @@ jobs:
       - name: Upload bottle job artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ steps.metadata.outputs.tag }}
+          name: ${{ steps.metadata.outputs.artifact_name }}
           path: |-
             ${{ steps.artifact.outputs.bottle_path }}
             ${{ steps.artifact.outputs.json_path }}
@@ -122,14 +122,16 @@ jobs:
           retention-days: 7
 
     outputs:
-      tag: ${{ steps.metadata.outputs.tag }}
+      artifact_name: ${{ steps.metadata.outputs.artifact_name }}
       version: ${{ steps.metadata.outputs.version }}
 
   publish:
     needs: build
+    if: github.ref == 'refs/heads/main'
     runs-on: macos-14
     permissions:
       contents: write
+      packages: write
       pull-requests: write
     env:
       FORMULA: ${{ inputs.formula }}
@@ -146,17 +148,16 @@ jobs:
       - name: Download bottle job artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ needs.build.outputs.tag }}
+          name: ${{ needs.build.outputs.artifact_name }}
           path: bottle-artifact
 
       - name: Validate bottle artifact
         id: artifact
         env:
-          BOTTLE_TAG: ${{ needs.build.outputs.tag }}
           BOTTLE_VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -Eeuo pipefail
-          root_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${BOTTLE_TAG}"
+          root_url="https://ghcr.io/v2/${TAP}"
           ruby scripts/validate-bottle-artifact.rb \
             --directory bottle-artifact \
             --formula "${FORMULA}" \
@@ -166,25 +167,14 @@ jobs:
             --root-url "${root_url}" \
             --github-output "${GITHUB_OUTPUT}"
 
-      - name: Publish bottle release
+      - name: Publish bottle package
         env:
-          GH_TOKEN: ${{ github.token }}
-          BOTTLE_PATH: ${{ steps.artifact.outputs.bottle_path }}
-          BOTTLE_TAG: ${{ needs.build.outputs.tag }}
-          BOTTLE_VERSION: ${{ needs.build.outputs.version }}
+          HOMEBREW_GITHUB_PACKAGES_TOKEN: ${{ github.token }}
+          HOMEBREW_GITHUB_PACKAGES_USER: ${{ github.repository_owner }}
         run: |
           set -Eeuo pipefail
-          gh api \
-            --method POST \
-            "repos/${GITHUB_REPOSITORY}/git/refs" \
-            -f ref="refs/tags/${BOTTLE_TAG}" \
-            -f sha="${GITHUB_SHA}"
-          gh release create "${BOTTLE_TAG}" "${BOTTLE_PATH}" \
-            --target "${GITHUB_SHA}" \
-            --verify-tag \
-            --prerelease \
-            --title "${FORMULA} ${BOTTLE_VERSION} bottle" \
-            --notes "Artagon Homebrew bottle built from the source pinned by Formula/${FORMULA}.rb."
+          cd bottle-artifact
+          brew pr-upload --upload-only
 
       - name: Merge bottle metadata into formula
         env:
@@ -196,6 +186,10 @@ jobs:
           tap_root="$(brew --repository "${TAP}")"
           brew bottle --merge --write --no-commit "${BOTTLE_JSON}"
           cp "${tap_root}/Formula/${FORMULA}.rb" "Formula/${FORMULA}.rb"
+          if git diff --quiet -- "Formula/${FORMULA}.rb"; then
+            printf 'Bottle merge did not change Formula/%s.rb\n' "${FORMULA}" >&2
+            exit 1
+          fi
 
       - name: Create bottle block pull request
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
@@ -212,7 +206,7 @@ jobs:
             version `${{ needs.build.outputs.version }}`.
 
             The bottle was built from the formula's pinned source, smoke-tested,
-            and published in release `${{ needs.build.outputs.tag }}`.
-          branch: bottle/${{ needs.build.outputs.tag }}
+            and published to the tap's GitHub Container Registry package.
+          branch: bottle/${{ needs.build.outputs.artifact_name }}
           delete-branch: true
           add-paths: Formula/${{ inputs.formula }}.rb

@@ -1,20 +1,28 @@
+# typed: strict
+# frozen_string_literal: true
+
 require "digest"
+require "erb"
 require "fileutils"
 require "json"
 require "minitest/autorun"
 require "open3"
 require "tmpdir"
 
+# Exercises strict bottle artifact and metadata validation.
 class BottleArtifactValidatorTest < Minitest::Test
-  ROOT = File.expand_path("..", __dir__)
-  SCRIPT = File.join(ROOT, "scripts", "validate-bottle-artifact.rb")
+  ROOT = File.expand_path("..", __dir__).freeze
+  SCRIPT = File.join(ROOT, "scripts", "validate-bottle-artifact.rb").freeze
   FORMULA = "openjdk-valhalla@28"
   TAP = "artagon/jdkvalhalla"
   VERSION = "28-ea-20260727-f181286389fa"
   REVISION = "0123456789abcdef0123456789abcdef01234567"
-  ROOT_URL = "https://github.com/artagon/homebrew-jdkvalhalla/releases/download/" \
-             "bottle-openjdk-valhalla-28-test"
+  ROOT_URL = "https://ghcr.io/v2/artagon/jdkvalhalla"
   BOTTLE = "openjdk-valhalla@28--28-ea-20260727-f181286389fa.arm64_sonoma.bottle.tar.gz"
+
+  def remote_filename(local_filename)
+    ERB::Util.url_encode(local_filename.sub(/\A#{Regexp.escape(FORMULA)}--/o, "#{FORMULA}-"))
+  end
 
   def run_validator(directory, output)
     Open3.capture3(
@@ -26,7 +34,7 @@ class BottleArtifactValidatorTest < Minitest::Test
       "--version", VERSION,
       "--git-revision", REVISION,
       "--root-url", ROOT_URL,
-      "--github-output", output,
+      "--github-output", output
     )
   end
 
@@ -38,18 +46,18 @@ class BottleArtifactValidatorTest < Minitest::Test
     payload = {
       "#{TAP}/#{FORMULA}" => {
         "formula" => {
-          "name" => FORMULA,
-          "pkg_version" => VERSION,
-          "tap_git_path" => "Formula/#{FORMULA}.rb",
+          "name"             => FORMULA,
+          "pkg_version"      => VERSION,
+          "tap_git_path"     => "Formula/#{FORMULA}.rb",
           "tap_git_revision" => REVISION,
         },
-        "bottle" => {
+        "bottle"  => {
           "root_url" => ROOT_URL,
-          "tags" => {
+          "tags"     => {
             "arm64_sonoma" => {
-              "filename" => BOTTLE,
+              "filename"       => remote_filename(BOTTLE),
               "local_filename" => BOTTLE,
-              "sha256" => sha256,
+              "sha256"         => sha256,
             },
           },
         },
@@ -71,6 +79,61 @@ class BottleArtifactValidatorTest < Minitest::Test
         "bottle_path=#{File.realpath(bottle_path)}\njson_path=#{File.realpath(json_path)}\n",
         File.read(output),
       )
+    end
+  end
+
+  def test_accepts_revisioned_formula_version
+    Dir.mktmpdir do |directory|
+      revisioned_version = "#{VERSION}_1"
+      bottle_path, json_path = write_valid_artifact(directory)
+      revisioned_bottle = File.join(directory, File.basename(bottle_path).sub(VERSION, revisioned_version))
+      revisioned_json = File.join(directory, File.basename(json_path).sub(VERSION, revisioned_version))
+      FileUtils.mv(bottle_path, revisioned_bottle)
+      payload = JSON.parse(File.read(json_path))
+      entry = payload.fetch("#{TAP}/#{FORMULA}")
+      entry.fetch("formula")["pkg_version"] = revisioned_version
+      tag = entry.fetch("bottle").fetch("tags").values.first
+      tag["local_filename"] = File.basename(revisioned_bottle)
+      tag["filename"] = remote_filename(File.basename(revisioned_bottle))
+      tag["sha256"] = Digest::SHA256.file(revisioned_bottle).hexdigest
+      File.write(revisioned_json, JSON.pretty_generate(payload))
+      FileUtils.rm_f(json_path)
+      output = File.join(directory, "github-output")
+
+      _stdout, stderr, status = Open3.capture3(
+        RbConfig.ruby,
+        SCRIPT,
+        "--directory", directory,
+        "--formula", FORMULA,
+        "--tap", TAP,
+        "--version", revisioned_version,
+        "--git-revision", REVISION,
+        "--root-url", ROOT_URL,
+        "--github-output", output
+      )
+
+      assert status.success?, stderr
+    end
+  end
+
+  def test_rejects_noncanonical_container_registry_root
+    Dir.mktmpdir do |directory|
+      write_valid_artifact(directory)
+
+      _stdout, stderr, status = Open3.capture3(
+        RbConfig.ruby,
+        SCRIPT,
+        "--directory", directory,
+        "--formula", FORMULA,
+        "--tap", TAP,
+        "--version", VERSION,
+        "--git-revision", REVISION,
+        "--root-url", "https://ghcr.io/v2/another/tap",
+        "--github-output", File.join(directory, "output")
+      )
+
+      refute status.success?
+      assert_includes stderr, "invalid bottle root URL"
     end
   end
 

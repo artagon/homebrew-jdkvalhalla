@@ -21,6 +21,8 @@ setup() {
 }
 
 @test "rolling source token resolves to JDK 28" {
+  [ -e "${REPO_ROOT}/Aliases/openjdk-valhalla" ]
+
   run readlink "${REPO_ROOT}/Aliases/openjdk-valhalla"
 
   [ "${status}" -eq 0 ]
