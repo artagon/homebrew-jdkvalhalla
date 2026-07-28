@@ -184,9 +184,10 @@ in the consolidation branch or explicitly rejected with a recorded reason.
 9. After the owner merges it, apply the final canonical repository security
    settings and verify package installs from the merged default branch.
 10. Close legacy pull request `homebrew-jdk26ea#6` as superseded.
-11. Create a minimal legacy cleanup pull request containing only the OpenJDK
-    26.0.2 compatibility update, deprecation notice, and canonical migration
-    link.
+11. Create a minimal legacy cleanup pull request containing the OpenJDK 26.0.2
+    compatibility update, deprecation notice, canonical migration link, and the
+    fail-closed validation-status correction required by the repository's
+    read-only workflow token policy.
 12. Let the repository owner merge the legacy cleanup pull request.
 13. Verify the legacy compatibility token and canonical installation paths.
 14. Archive `artagon/homebrew-jdk26ea`.
