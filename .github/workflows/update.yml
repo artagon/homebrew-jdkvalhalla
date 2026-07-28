@@ -23,13 +23,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Cache JDK downloads
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: /tmp/jdk-cache
-          key: valhalla-${{ github.sha }}
-          restore-keys: valhalla-
-
       - name: Parse official Valhalla release
         id: release
         run: |
@@ -42,6 +35,12 @@ jobs:
             'https://jdk.java.net/valhalla/' \
             --output "${page_file}"
           ruby scripts/parse-valhalla-release.rb "${page_file}" "${GITHUB_OUTPUT}"
+
+      - name: Cache JDK downloads
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: /tmp/jdk-cache
+          key: valhalla-${{ steps.release.outputs.full_version }}
 
       - name: Download and verify official archives
         id: archives
@@ -72,7 +71,7 @@ jobs:
             local key="$1"
             local platform="$2"
             local url="${base}/openjdk-${FULL_VERSION}_${platform}_bin.tar.gz"
-            local checksum_text expected archive actual
+            local checksum_text expected archive actual partial
             validate_url "${url}"
             checksum_text="$(curl --fail --silent --show-error --location \
               --proto '=https' --tlsv1.2 \
@@ -85,12 +84,27 @@ jobs:
             }
 
             archive="${cache_dir}/$(basename "${url}")"
-            curl --fail --silent --show-error --location \
-              --proto '=https' --tlsv1.2 \
-              --connect-timeout 15 --max-time 1800 --retry 3 \
-              "${url}" --output "${archive}"
-            actual="$(sha256sum "${archive}")"
-            actual="${actual%%[[:space:]]*}"
+            actual=""
+            if [[ -f "${archive}" ]]; then
+              actual="$(sha256sum "${archive}")"
+              actual="${actual%%[[:space:]]*}"
+            fi
+            if [[ "${actual}" != "${expected}" ]]; then
+              partial="${archive}.partial"
+              rm -f -- "${partial}"
+              curl --fail --silent --show-error --location \
+                --proto '=https' --tlsv1.2 \
+                --connect-timeout 15 --max-time 1800 --retry 3 \
+                "${url}" --output "${partial}"
+              actual="$(sha256sum "${partial}")"
+              actual="${actual%%[[:space:]]*}"
+              if [[ "${actual}" != "${expected}" ]]; then
+                rm -f -- "${partial}"
+                printf 'Checksum mismatch for %s\n' "${platform}" >&2
+                exit 1
+              fi
+              mv -- "${partial}" "${archive}"
+            fi
             [[ "${actual}" == "${expected}" ]] || {
               printf 'Checksum mismatch for %s\n' "${platform}" >&2
               exit 1
@@ -135,7 +149,11 @@ jobs:
             "linux-x64" => [ENV.fetch("URL_LINUX_X64"), ENV.fetch("SHA_LINUX_X64")],
           }
 
-          template = Dir["Formula/jdkvalhalla@*.rb"].max
+          template = Dir["Formula/jdkvalhalla@*.rb"].max_by do |path|
+            match = File.basename(path).match(/\Ajdkvalhalla@(\d+)\.rb\z/)
+            abort "invalid prebuilt formula template path: #{path}" unless match
+            Integer(match[1], 10)
+          end
           abort "no prebuilt formula template" unless template
           formula = File.read(template)
           replacements = {
@@ -157,15 +175,22 @@ jobs:
           end
 
           cask = File.read("Casks/jdkvalhalla.rb")
-          cask = cask.sub(/version "[^"]+"/, "version \"#{full_version},#{build}\"")
+          cask_version_pattern = /version "[^"]+"/
+          cask_checksum_pattern = /sha256 arm:\s+"[0-9a-f]{64}",\n\s*intel:\s+"[0-9a-f]{64}"/
+          cask_url_pattern = %r{url "https://download\.java\.net/java/early_access/valhalla/\d+/\#\{version\.csv\.second\}/openjdk-\#\{version\.csv\.first\}_macos-\#\{arch\}_bin\.tar\.gz"}
+          abort "cask version pattern missing" unless cask.match?(cask_version_pattern)
+          abort "cask checksum pattern missing" unless cask.match?(cask_checksum_pattern)
+          abort "cask URL pattern missing" unless cask.match?(cask_url_pattern)
+          cask = cask.sub(cask_version_pattern, "version \"#{full_version},#{build}\"")
           cask = cask.sub(
-            /sha256 arm:\s+"[0-9a-f]{64}",\n\s*intel:\s+"[0-9a-f]{64}"/,
+            cask_checksum_pattern,
             "sha256 arm:   \"#{ENV.fetch("SHA_MAC_ARM")}\",\n" \
             "         intel: \"#{ENV.fetch("SHA_MAC_INTEL")}\"",
           )
           cask = cask.sub(
-            %r{(https://download\.java\.net/java/early_access/valhalla/)\d+/},
-            "\\1#{jdk_version}/",
+            cask_url_pattern,
+            "url \"https://download.java.net/java/early_access/valhalla/#{jdk_version}/" \
+            "\#{version.csv.second}/openjdk-\#{version.csv.first}_macos-\#{arch}_bin.tar.gz\"",
           )
 
           output_formula = "generated/Formula/jdkvalhalla@#{jdk_version}.rb"
@@ -208,6 +233,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-24.04
     permissions:
+      actions: write
       contents: write
       pull-requests: write
     steps:
@@ -245,6 +271,7 @@ jobs:
           cp generated/Casks/jdkvalhalla.rb Casks/
 
       - name: Create update pull request
+        id: create-pull-request
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ github.token }}
@@ -267,3 +294,10 @@ jobs:
           add-paths: |-
             Casks/jdkvalhalla.rb
             Formula/jdkvalhalla@${{ needs.prepare.outputs.jdk_version }}.rb
+
+      - name: Dispatch validation
+        if: ${{ steps.create-pull-request.outputs.pull-request-number != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_REF: ${{ steps.create-pull-request.outputs.pull-request-branch }}
+        run: gh workflow run validate.yml --ref "${VALIDATION_REF}"
