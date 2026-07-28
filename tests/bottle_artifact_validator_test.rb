@@ -19,6 +19,7 @@ class BottleArtifactValidatorTest < Minitest::Test
   REVISION = "0123456789abcdef0123456789abcdef01234567"
   ROOT_URL = "https://ghcr.io/v2/artagon/jdkvalhalla"
   BOTTLE = "openjdk-valhalla@28--28-ea-20260727-f181286389fa.arm64_sonoma.bottle.tar.gz"
+  REMOTE_BOTTLE = "openjdk-valhalla%4028-28-ea-20260727-f181286389fa.arm64_sonoma.bottle.tar.gz"
 
   def remote_filename(local_filename)
     ERB::Util.url_encode(local_filename.sub(/\A#{Regexp.escape(FORMULA)}--/o, "#{FORMULA}-"))
@@ -55,7 +56,7 @@ class BottleArtifactValidatorTest < Minitest::Test
           "root_url" => ROOT_URL,
           "tags"     => {
             "arm64_sonoma" => {
-              "filename"       => remote_filename(BOTTLE),
+              "filename"       => REMOTE_BOTTLE,
               "local_filename" => BOTTLE,
               "sha256"         => sha256,
             },
@@ -80,6 +81,10 @@ class BottleArtifactValidatorTest < Minitest::Test
         File.read(output),
       )
     end
+  end
+
+  def test_homebrew_remote_filename_percent_encodes_version_separator
+    assert_equal REMOTE_BOTTLE, remote_filename(BOTTLE)
   end
 
   def test_accepts_revisioned_formula_version

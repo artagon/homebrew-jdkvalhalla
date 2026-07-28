@@ -46,19 +46,29 @@ class WorkflowSecurityTest < Minitest::Test
     )
   end
 
-  def test_bottle_package_is_bound_to_main_commit_and_refuses_overwrite
+  def test_bottle_package_is_bound_to_main_commit_and_requires_exact_anonymous_retry
     document = workflow("bottles.yml")
     build = document.fetch("jobs").fetch("build")
     publish = document.fetch("jobs").fetch("publish")
     metadata = build.fetch("steps").find { |step| step["name"] == "Resolve bottle metadata" }
     package_step = publish.fetch("steps").find { |step| step["name"] == "Publish bottle package" }
+    verify_step = publish.fetch("steps").find { |step| step["name"] == "Verify anonymous bottle package" }
+    pull_request_step = publish.fetch("steps").find { |step| step["name"] == "Create bottle block pull request" }
 
     assert_includes metadata.fetch("run"), '[[ "${GITHUB_REF}" == "refs/heads/main" ]]'
     assert_includes metadata.fetch("run"), "${GITHUB_SHA::12}"
     assert_includes metadata.fetch("run"), 'formula.fetch("revision", 0)'
     assert_includes package_step.fetch("run"), "brew pr-upload --upload-only"
     refute_includes package_step.fetch("run"), "--keep-old"
-    refute_includes package_step.fetch("run"), "--warn-on-upload-failure"
+    assert_includes package_step.fetch("run"), "--warn-on-upload-failure"
+    assert_empty verify_step.fetch("env").keys.grep(/TOKEN/)
+    assert_includes verify_step.fetch("run"), 'image_formula="${FORMULA%@*}/${FORMULA#*@}"'
+    assert_includes verify_step.fetch("run"), "skopeo inspect --raw"
+    assert_includes verify_step.fetch("run"), '"sh.brew.bottle.digest"'
+    assert_includes verify_step.fetch("run"), '"architecture") == "arm64"'
+    assert_includes verify_step.fetch("run"), '"os") == "darwin"'
+    assert_operator publish.fetch("steps").index(package_step), :<, publish.fetch("steps").index(verify_step)
+    assert_operator publish.fetch("steps").index(verify_step), :<, publish.fetch("steps").index(pull_request_step)
   end
 
   def test_bottle_build_uses_nonconflicting_homebrew_flags

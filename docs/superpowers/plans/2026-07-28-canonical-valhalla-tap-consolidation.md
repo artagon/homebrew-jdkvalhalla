@@ -344,7 +344,9 @@ Also assert that:
 - artifact text contains `${GITHUB_SHA::12}`;
 - publication runs only for `refs/heads/main`;
 - publication uses `brew pr-upload --upload-only`;
-- no command enables `--keep-old` or `--warn-on-upload-failure`;
+- no command enables `--keep-old`;
+- a retry may tolerate an existing upload only before a token-free `skopeo`
+  inspection verifies the exact ARM64 macOS bottle digest;
 - upload paths come only from validator outputs;
 - package and merge steps use validator outputs, not globs or `find`;
 - all action references match `\A[^@\s]+@[0-9a-f]{40}\z`.
@@ -373,7 +375,11 @@ Use the exact action revisions from this plan. Keep `permissions: {}` at the
 workflow level, `contents: read` on `build`, and `contents: write` plus
 `packages: write` and `pull-requests: write` only on `publish`. Scope
 `HOMEBREW_GITHUB_PACKAGES_TOKEN` to the package step. Keep the exact validator
-call in both trust zones.
+call in both trust zones. Since new GHCR packages default to private, require an
+anonymous exact-digest inspection after upload and before the bottle-block pull
+request. On a first publication, the owner makes the new package public and
+reruns the workflow; the rerun may skip the existing upload only because the
+anonymous inspection remains mandatory.
 
 - [ ] **Step 4: Validate the workflow**
 

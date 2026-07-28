@@ -114,7 +114,12 @@ Bottle publication is split into two trust zones:
    receives write permission. It uploads through Homebrew's GitHub Container
    Registry client, which rejects an existing package version unless an
    explicit overwrite-preserving mode is requested. The workflow never enables
-   that mode. GHCR avoids GitHub Release asset renaming for versioned formula
+   that mode. A retry may skip an existing package only when an anonymous OCI
+   inspection proves that the published index contains exactly the validated
+   ARM64 macOS bottle digest. This supports the one-time GHCR visibility change:
+   the first run uploads the default-private package and stops, the owner makes
+   it public, and the rerun verifies it before creating the bottle-block pull
+   request. GHCR avoids GitHub Release asset renaming for versioned formula
    names containing `@`, and Homebrew resolves installs by OCI digest.
 
 The validator rejects missing, extra, duplicate, ambiguously named, or

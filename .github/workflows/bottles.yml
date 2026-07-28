@@ -174,7 +174,36 @@ jobs:
         run: |
           set -Eeuo pipefail
           cd bottle-artifact
-          brew pr-upload --upload-only
+          brew pr-upload --upload-only --warn-on-upload-failure
+
+      - name: Verify anonymous bottle package
+        env:
+          BOTTLE_JSON: ${{ steps.artifact.outputs.json_path }}
+          BOTTLE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          manifest_file="$(mktemp)"
+          trap 'rm -f -- "${manifest_file}"' EXIT
+          image_formula="${FORMULA%@*}/${FORMULA#*@}"
+          image="docker://ghcr.io/${TAP}/${image_formula}:${BOTTLE_VERSION}"
+          if ! skopeo inspect --raw "${image}" >"${manifest_file}"; then
+            printf '%s\n' \
+              'Bottle package is not anonymously readable.' \
+              'For a first publish, make the new GHCR package public and rerun this workflow.' >&2
+            exit 1
+          fi
+          ruby -rjson -e '
+            manifest = JSON.parse(File.read(ARGV.fetch(0)))
+            bottle = JSON.parse(File.read(ARGV.fetch(1))).values.fetch(0).fetch("bottle")
+            expected = bottle.fetch("tags").values.fetch(0).fetch("sha256")
+            descriptors = manifest.fetch("manifests")
+            abort "anonymous GHCR manifest must contain exactly one bottle" unless descriptors.one?
+            descriptor = descriptors.fetch(0)
+            valid = descriptor.dig("annotations", "sh.brew.bottle.digest") == expected &&
+                    descriptor.dig("platform", "architecture") == "arm64" &&
+                    descriptor.dig("platform", "os") == "darwin"
+            abort "anonymous GHCR manifest does not match the validated bottle" unless valid
+          ' "${manifest_file}" "${BOTTLE_JSON}"
 
       - name: Merge bottle metadata into formula
         env:
