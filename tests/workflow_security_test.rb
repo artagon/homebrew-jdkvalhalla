@@ -1,7 +1,10 @@
 # typed: strict
 # frozen_string_literal: true
 
+require "fileutils"
 require "minitest/autorun"
+require "open3"
+require "tmpdir"
 require "yaml"
 
 # Enforces least-privilege and immutable-reference workflow contracts.
@@ -102,6 +105,141 @@ class WorkflowSecurityTest < Minitest::Test
     refute_includes merge.fetch("run"), "find bottle-artifact"
   end
 
+  def test_validation_fan_in_is_read_only_and_fail_closed
+    document = workflow("validate.yml")
+    status = document.fetch("jobs").fetch("validation-status")
+    confirm = status.fetch("steps").find { |step| step["name"] == "Confirm completion" }
+
+    assert_equal({ "contents" => "read" }, document["permissions"])
+    assert_equal "${{ always() }}", status["if"]
+    assert_equal(
+      %w[test-cask-macos test-prebuilt-formula validate-static],
+      status.fetch("needs").sort,
+    )
+    assert_equal(
+      {
+        "VALIDATE_STATIC_RESULT"       => "${{ needs.validate-static.result }}",
+        "TEST_CASK_MACOS_RESULT"       => "${{ needs.test-cask-macos.result }}",
+        "TEST_PREBUILT_FORMULA_RESULT" => "${{ needs.test-prebuilt-formula.result }}",
+      },
+      confirm["env"],
+    )
+    assert_includes confirm.fetch("run"), "for result in \\"
+    assert_includes confirm.fetch("run"), 'if [[ "${result}" != "success" ]]'
+    assert_includes confirm.fetch("run"), "exit 1"
+
+    all_steps = document.fetch("jobs").values.flat_map { |job| job.fetch("steps", []) }
+    all_steps.each do |step|
+      refute step.fetch("env", {}).key?("GH_TOKEN")
+      refute_includes step.fetch("run", ""), "/statuses/"
+    end
+  end
+
+  def test_validation_never_installs_source_formulae
+    document = workflow("validate.yml")
+    commands = document.fetch("jobs").values.flat_map { |job| job.fetch("steps", []) }
+                                            .each_with_object([]) do |step, run_steps|
+      run_steps << step["run"] if step["run"]
+    end.join("\n")
+
+    refute_match(/brew install .*openjdk-valhalla/, commands)
+    assert_equal(
+      %w[jdkvalhalla@26 jdkvalhalla@27],
+      document.dig("jobs", "test-prebuilt-formula", "strategy", "matrix", "formula"),
+    )
+  end
+
+  def test_update_workflow_separates_read_and_write_trust_zones
+    document = workflow("update.yml")
+    prepare = document.fetch("jobs").fetch("prepare")
+    create_pr = document.fetch("jobs").fetch("create-pr")
+
+    assert_equal({}, document["permissions"])
+    assert_equal({ "contents" => "read" }, prepare["permissions"])
+    assert_equal(
+      { "contents" => "write", "pull-requests" => "write" },
+      create_pr["permissions"],
+    )
+
+    all_steps = document.fetch("jobs").values.flat_map { |job| job.fetch("steps", []) }
+    pull_request_steps = all_steps.select do |step|
+      step["uses"]&.start_with?("peter-evans/create-pull-request@")
+    end
+    assert_equal 1, pull_request_steps.length
+    assert_includes create_pr.fetch("steps"), pull_request_steps.first
+    assert_equal(
+      "peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1",
+      pull_request_steps.first["uses"],
+    )
+  end
+
+  def test_update_workflow_validates_sources_checksums_and_exact_artifact
+    document = workflow("update.yml")
+    prepare_steps = document.dig("jobs", "prepare", "steps")
+    create_steps = document.dig("jobs", "create-pr", "steps")
+    parse = prepare_steps.find { |step| step["name"] == "Parse official Valhalla release" }
+    archives = prepare_steps.find { |step| step["name"] == "Download and verify official archives" }
+    upload = prepare_steps.find { |step| step["name"] == "Upload generated packages" }
+    validate = create_steps.find { |step| step["name"] == "Validate exact generated paths" }
+
+    assert_includes parse.fetch("run"), "scripts/parse-valhalla-release.rb"
+    assert_includes parse.fetch("run"), "https://jdk.java.net/valhalla/"
+    assert_includes archives.fetch("run"), 'uri.host == "download.java.net"'
+    assert_includes archives.fetch("run"), '[[ "${expected}" =~ ^[0-9a-f]{64}$ ]]'
+    assert_includes archives.fetch("run"), 'actual="$(sha256sum "${archive}")"'
+    assert_equal(
+      "generated/Casks/jdkvalhalla.rb\n" \
+      "generated/Formula/jdkvalhalla@${{ steps.release.outputs.jdk_version }}.rb",
+      upload.dig("with", "path"),
+    )
+    assert_includes validate.fetch("run"), 'abort "generated package allowlist mismatch"'
+    assert_includes validate.fetch("run"), "File.symlink?(path)"
+    assert_includes validate.fetch("run"), 'cp "generated/Formula/jdkvalhalla@${JDK_VERSION}.rb" Formula/'
+    assert_includes validate.fetch("run"), "cp generated/Casks/jdkvalhalla.rb Casks/"
+  end
+
+  def test_update_renderer_reproduces_current_prebuilt_packages
+    render = workflow("update.yml").dig("jobs", "prepare", "steps")
+                                   .find { |step| step["name"] == "Render formula and cask" }
+    environment = {
+      "BUILD"         => "1",
+      "FULL_VERSION"  => "27-jep401ea3+1-1",
+      "JDK_VERSION"   => "27",
+      "SHA_LINUX_ARM" => "f9b56dd9fed330aa30ff2428f58358dc2cc67eae53be8805f819062d925d314a",
+      "SHA_LINUX_X64" => "b8bdd7b181c6a5ea2dd9959255e222cd9d9a9f42cca4f2400991b9b2ff7ffb7d",
+      "SHA_MAC_ARM"   => "d97c8e0d90d95b81bf99cfef0b1e1edebeb07655fc84c42e6ed99d882aebe76b",
+      "SHA_MAC_INTEL" => "64d2deee65c221b7fbdfb936d42981987c1505a6057a1847e5fdb37afabb103a",
+    }
+    environment["URL_LINUX_ARM"] =
+      "https://download.java.net/java/early_access/valhalla/27/1/" \
+      "openjdk-27-jep401ea3+1-1_linux-aarch64_bin.tar.gz"
+    environment["URL_LINUX_X64"] =
+      "https://download.java.net/java/early_access/valhalla/27/1/" \
+      "openjdk-27-jep401ea3+1-1_linux-x64_bin.tar.gz"
+    environment["URL_MAC_ARM"] =
+      "https://download.java.net/java/early_access/valhalla/27/1/" \
+      "openjdk-27-jep401ea3+1-1_macos-aarch64_bin.tar.gz"
+    environment["URL_MAC_INTEL"] =
+      "https://download.java.net/java/early_access/valhalla/27/1/" \
+      "openjdk-27-jep401ea3+1-1_macos-x64_bin.tar.gz"
+
+    Dir.mktmpdir do |directory|
+      FileUtils.cp_r(File.join(ROOT, "Formula"), directory)
+      FileUtils.cp_r(File.join(ROOT, "Casks"), directory)
+      _stdout, stderr, status = Open3.capture3(environment, "bash", "-c", render.fetch("run"), chdir: directory)
+
+      assert status.success?, stderr
+      assert_equal(
+        File.read(File.join(ROOT, "Formula", "jdkvalhalla@27.rb")),
+        File.read(File.join(directory, "generated", "Formula", "jdkvalhalla@27.rb")),
+      )
+      assert_equal(
+        File.read(File.join(ROOT, "Casks", "jdkvalhalla.rb")),
+        File.read(File.join(directory, "generated", "Casks", "jdkvalhalla.rb")),
+      )
+    end
+  end
+
   def test_every_action_reference_is_an_immutable_commit
     action_references = Dir[File.join(ROOT, ".github", "workflows", "*.yml")].flat_map do |path|
       document = YAML.load_file(path)
@@ -114,5 +252,25 @@ class WorkflowSecurityTest < Minitest::Test
     action_references.each do |reference|
       assert_match(/\A[^@\s]+@[0-9a-f]{40}\z/, reference)
     end
+  end
+
+  def test_every_workflow_declares_permissions_and_safe_checkout
+    workflow_paths = Dir[File.join(ROOT, ".github", "workflows", "*.yml")]
+
+    workflow_paths.each do |path|
+      document = YAML.load_file(path)
+      assert document.key?("permissions"), "#{File.basename(path)} has no top-level permissions"
+      checkout_steps(document).each do |step|
+        assert_equal(
+          false,
+          step.dig("with", "persist-credentials"),
+          "#{File.basename(path)} checkout persists credentials",
+        )
+      end
+    end
+  end
+
+  def test_obsolete_release_workflow_is_removed
+    refute File.exist?(File.join(ROOT, ".github", "workflows", "release.yml"))
   end
 end
