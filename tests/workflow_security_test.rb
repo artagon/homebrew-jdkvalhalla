@@ -12,7 +12,8 @@ class WorkflowSecurityTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__).freeze
 
   def workflow(name)
-    YAML.load_file(File.join(ROOT, ".github", "workflows", name))
+    path = File.join(ROOT, ".github", "workflows", name)
+    YAML.safe_load_file(path, permitted_classes: [], permitted_symbols: [], aliases: true)
   end
 
   def checkout_steps(document)
