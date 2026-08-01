@@ -1,234 +1,154 @@
-# homebrew-jdkvalhalla
+# Homebrew JDK Valhalla
 
-Homebrew tap for JDK Project Valhalla early-access builds with automated updates, CI/CD, and support for both macOS and Linux. Currently provides JDK 26 and JDK 27 Valhalla builds.
+Homebrew packages for supported [OpenJDK Project
+Valhalla](https://openjdk.org/projects/valhalla/) early-access releases.
+Choose an official prebuilt JDK for a fast install, or a pinned source formula
+when you need an Artagon-built Valhalla snapshot.
 
-[![Release](https://github.com/Artagon/homebrew-jdkvalhalla/actions/workflows/release.yml/badge.svg)](https://github.com/Artagon/homebrew-jdkvalhalla/actions/workflows/release.yml)
-[![Validate](https://github.com/Artagon/homebrew-jdkvalhalla/actions/workflows/validate.yml/badge.svg)](https://github.com/Artagon/homebrew-jdkvalhalla/actions/workflows/validate.yml)
-[![License: GPL v2 with Classpath Exception](https://img.shields.io/badge/License-GPL_v2--with--Classpath--Exception-blue.svg)](https://openjdk.java.net/legal/gplv2+ce.html)
+[![Validate](https://github.com/artagon/homebrew-jdkvalhalla/actions/workflows/validate.yml/badge.svg)](https://github.com/artagon/homebrew-jdkvalhalla/actions/workflows/validate.yml)
+[![CodeQL](https://github.com/artagon/homebrew-jdkvalhalla/actions/workflows/codeql.yml/badge.svg)](https://github.com/artagon/homebrew-jdkvalhalla/actions/workflows/codeql.yml)
 
-## About Project Valhalla
+These are experimental EA JDKs for testing and development. They are not
+production JDKs, and preview APIs or class-file formats may change.
 
-[Project Valhalla](https://openjdk.org/projects/valhalla/) is an OpenJDK project focused on improving Java's performance and memory efficiency through fundamental language enhancements.
+## Install
 
-### What Does Valhalla Provide?
+You can use fully qualified commands without tapping first.
 
-**Value Classes and Objects ([JEP 401](https://openjdk.org/jeps/401))** - The cornerstone of Project Valhalla:
-- **Value Classes**: New type of class that represents pure data without object identity
-- **Flattened Memory Layout**: Value objects stored directly in memory without indirection (no object header overhead)
-- **Improved Cache Locality**: Better CPU cache performance through memory layout control
-- **Zero-Cost Abstraction**: High-level abstractions without runtime overhead
-- **Enhanced Generics**: Support for specialized generics over primitive and value types
+### Official prebuilt binaries
 
-### Performance Benefits
-
-- **Reduced Memory Footprint**: Value objects eliminate object headers, reducing memory usage by 50-80% for small objects
-- **Improved Cache Performance**: Direct memory layout means fewer cache misses
-- **Better GC Performance**: Fewer object references mean less garbage collection pressure
-- **Faster Array Operations**: Arrays of value types stored contiguously without indirection
-
-### Use Cases
-
-Valhalla is particularly beneficial for:
-- High-performance computing and scientific applications
-- Financial systems requiring low latency
-- Game engines and graphics processing
-- Big data processing and analytics
-- Any application with large collections of small objects (e.g., Point, Complex, Vector2D)
-
-This tap provides the latest Project Valhalla early-access builds implementing [JEP 401](https://openjdk.org/jeps/401).
-
-## Quick Start
-
-### Add the Tap
+The cask is the fast default on macOS:
 
 ```bash
-brew tap Artagon/jdkvalhalla
+brew install --cask artagon/jdkvalhalla/jdkvalhalla
 ```
 
-### Cask Installation (macOS) -- Latest (JDK 27)
+Versioned prebuilt formulas work on macOS and Linux:
 
 ```bash
-brew install --cask jdkvalhalla
+brew install artagon/jdkvalhalla/jdkvalhalla@27
+brew install artagon/jdkvalhalla/jdkvalhalla@26
 ```
 
-The cask installation places JDK in `/Library/Java/JavaVirtualMachines/jdk-valhalla.jdk` and integrates with macOS's Java management system. The cask always tracks the latest Valhalla build (currently JDK 27).
+The existing `jdkvalhalla`, `jdkvalhalla@26`, and `jdkvalhalla@27` tokens
+remain supported for backward compatibility.
 
-### Formula Installation (macOS/Linux)
+### Bottled or source-built JDKs
+
+`openjdk-valhalla` is the rolling source/bottle alias. The versioned source
+lines are `openjdk-valhalla@27` and `openjdk-valhalla@28`.
 
 ```bash
-# Install JDK 27 Valhalla (latest)
-brew install jdkvalhalla@27
+# Current rolling source line
+brew install artagon/jdkvalhalla/openjdk-valhalla
 
-# Install JDK 26 Valhalla (older)
-brew install jdkvalhalla@26
+# Select an exact line
+brew install artagon/jdkvalhalla/openjdk-valhalla@27
+brew install artagon/jdkvalhalla/openjdk-valhalla@28
 ```
 
-The formula installation creates symlinks in your Homebrew bin directory.
-
-## Current Versions
-
-| Build | Version | Formula / Cask |
-|-------|---------|----------------|
-| **JDK 27 Valhalla** | 27-jep401ea3+1-1 | `jdkvalhalla@27` / `jdkvalhalla` (cask) |
-| **JDK 26 Valhalla** | 26-jep401ea2+1-1 | `jdkvalhalla@26` |
-
-Both builds implement:
-- JEP 401: Value Classes and Objects
-
-### What Changed Between Builds
-
-**JDK 27 Valhalla (27-jep401ea3+1-1)** — Released 2026/3/11
-- Based on JDK 27 (up from JDK 26)
-- Third EA iteration of JEP 401 (`jep401ea3`)
-- Includes JDK 27 language and API changes alongside Valhalla features
-
-**JDK 26 Valhalla (26-jep401ea2+1-1)** — Released 2025/10/10
-- Based on JDK 26
-- Second EA iteration of JEP 401 (`jep401ea2`)
-
-## Features
-
-- **Automatic Updates**: Weekly checks for new Valhalla builds with automated formula/cask updates
-- **Multi-Platform Support**:
-  - macOS: ARM64 (Apple Silicon) and x64 (Intel)
-  - Linux: ARM64 (aarch64) and x64
-- **CI/CD Validation**: Automated testing on every commit across all supported platforms
-- **GitHub Releases**: Automatic release creation when new versions are detected
-- **Flexible Installation**: Choose between cask (macOS system integration) or formula (Homebrew-managed) installation
-- **Integrity Verification**: SHA-256 checksum validation for all downloads
-
-## Platform Support
-
-| Platform | Architecture | Cask | Formula | Status |
-|----------|-------------|------|---------|--------|
-| macOS 13+ | ARM64 (Apple Silicon) | ✅ | ✅ | Fully Tested |
-| macOS 13+ | x64 (Intel) | ✅ | ✅ | Fully Tested |
-| Linux | ARM64 (aarch64) | ❌ | ✅ | Fully Tested |
-| Linux | x64 | ❌ | ✅ | Fully Tested |
-
-**Note:** Cask installation is macOS-only and integrates with the system's Java framework at `/Library/Java/JavaVirtualMachines/`. Formula installation works on both macOS and Linux, placing files in the Homebrew prefix.
-
-## Usage
-
-### Setting JAVA_HOME
-
-After installation, you may want to set `JAVA_HOME`:
-
-**For cask installation:**
-```bash
-export JAVA_HOME="/Library/Java/JavaVirtualMachines/jdk-valhalla.jdk/Contents/Home"
-```
-
-**For formula installation:**
-```bash
-export JAVA_HOME="$(brew --prefix jdkvalhalla@27)"
-```
-
-### Verifying Installation
+Homebrew installs a compatible bottle when one is published. Otherwise, the
+same command builds the formula's pinned OpenJDK revision locally. To require a
+local source build even when a bottle exists:
 
 ```bash
-java -version
-# JDK 27: openjdk version "27-jep401ea3" ...
-# JDK 26: openjdk version "26-jep401ea2" ...
+brew install --build-from-source artagon/jdkvalhalla/openjdk-valhalla@28
 ```
 
-### Using Value Classes (JEP 401)
-
-Project Valhalla introduces value classes that provide better performance and memory efficiency:
-
-```java
-// Enable preview features to use value classes
-javac --enable-preview --release 27 MyValueClass.java
-java --enable-preview MyValueClass
-```
-
-## Updating
-
-The tap is automatically updated with new Valhalla builds. To update to the latest version:
+Source builds are long-running and can take hours. They are Apple
+Silicon-only, require macOS Sonoma or newer and Xcode 15.4 or newer, and cap
+the build at four jobs. Check the selected package before an unexpected build:
 
 ```bash
-brew update
-brew upgrade jdkvalhalla@27  # or brew upgrade --cask jdkvalhalla
+brew info artagon/jdkvalhalla/openjdk-valhalla@28
 ```
 
-## Issue Reporting
+## Package matrix
 
-Found a problem? [Open an issue](https://github.com/Artagon/homebrew-jdkvalhalla/issues/new/choose) using our issue templates.
+| Token | Mode | Release line | Platforms |
+| --- | --- | --- | --- |
+| `jdkvalhalla` | Official prebuilt cask | Current Valhalla EA | macOS |
+| `jdkvalhalla@26` | Official prebuilt formula | JDK 26 Valhalla EA | macOS, Linux |
+| `jdkvalhalla@27` | Official prebuilt formula | JDK 27 Valhalla EA | macOS, Linux |
+| `openjdk-valhalla` | Rolling source/bottle alias | Current source line | Apple Silicon macOS |
+| `openjdk-valhalla@27` | Pinned source/bottle formula | JDK 27 Valhalla | Apple Silicon macOS |
+| `openjdk-valhalla@28` | Pinned source/bottle formula | JDK 28 Valhalla | Apple Silicon macOS |
 
-## Automated Updates
+The current prebuilt releases are `26-jep401ea2+1-1` and
+`27-jep401ea3+1-1`. Source formula versions include the pinned OpenJDK commit
+so an update is explicit and reviewable.
 
-This repository uses GitHub Actions to automatically maintain the latest Valhalla builds:
+## Use with jenv
 
-### Update Workflow
-1. **Weekly Checks** (Sundays at 12:00 UTC): Automated script checks [jdk.java.net/valhalla](https://jdk.java.net/valhalla/) for new builds
-2. **Multi-Platform Download**: Downloads and verifies binaries for all supported platforms:
-   - macOS: ARM64 and x64
-   - Linux: ARM64 and x64
-3. **SHA-256 Verification**: Calculates checksums for all platform binaries
-4. **Automated PR Creation**: Creates pull request with updated formula/cask when new version detected
-5. **CI/CD Validation**: Runs comprehensive tests across all platforms:
-   - Syntax validation for Ruby code
-   - Installation tests on macOS 13, macOS 14, Ubuntu 22.04, Ubuntu 24.04
-   - Runtime verification (Java version check and basic compilation)
-6. **Auto-Merge**: PR automatically merges after passing all tests
-7. **GitHub Release**: Creates tagged release with version notes
+Register the installed JDK home that matches the package mode.
 
-### Manual Trigger
-You can manually trigger an update check:
 ```bash
-# Via GitHub CLI
-gh workflow run update.yml -R Artagon/homebrew-jdkvalhalla
+# Prebuilt cask
+jenv add /Library/Java/JavaVirtualMachines/jdk-valhalla.jdk/Contents/Home
+
+# Versioned prebuilt formula
+jenv add "$(brew --prefix jdkvalhalla@27)/libexec"
+
+# Versioned source/bottle formulas
+jenv add "$(brew --prefix openjdk-valhalla@27)/libexec/openjdk.jdk/Contents/Home"
+jenv add "$(brew --prefix openjdk-valhalla@28)/libexec/openjdk.jdk/Contents/Home"
 ```
 
-Or visit the [Actions tab](https://github.com/Artagon/homebrew-jdkvalhalla/actions/workflows/update.yml) and click "Run workflow".
+List the identifiers discovered by `jenv`, then select one for a project or
+for your user account:
 
-## Project Valhalla Resources
-
-### Official Documentation
-- **[JEP 401: Value Classes and Objects](https://openjdk.org/jeps/401)** - Official JEP specification for value types
-- **[Project Valhalla Home](https://openjdk.org/projects/valhalla/)** - Main project page with overview and goals
-- **[Early Access Downloads](https://jdk.java.net/valhalla/)** - Official download page for Valhalla builds
-- **[Early Access Build Info](https://openjdk.org/projects/valhalla/early-access)** - Build information and release notes
-
-### Technical Specifications
-- **[Latest JEP 401 Specification](http://cr.openjdk.java.net/~dlsmith/jep401/latest)** - Detailed technical specification and implementation notes
-- **[API Documentation](https://download.java.net/java/early_access/valhalla/docs/api/)** - JavaDoc for Valhalla early-access builds
-- **[State of Valhalla (Brian Goetz)](https://cr.openjdk.java.net/~briangoetz/valhalla/sov/)** - Series of documents explaining Valhalla's design and evolution
-- **[Valhalla Mailing List Archives](https://mail.openjdk.org/pipermail/valhalla-dev/)** - Development discussions and technical details
-
-### Talks and Presentations
-- **[Introduction to Project Valhalla](https://openjdk.org/projects/valhalla/)** - Getting started with value types
-- **[Java Language Futures (Brian Goetz)](https://www.youtube.com/results?search_query=brian+goetz+valhalla)** - Conference talks about Valhalla
-- **[OpenJDK Valhalla Updates](https://wiki.openjdk.org/display/valhalla)** - Wiki with status updates and design documents
-
-### Community and Support
-- **[Valhalla Dev Mailing List](https://mail.openjdk.org/mailman/listinfo/valhalla-dev)** - Join the development discussion
-- **[OpenJDK Wiki - Valhalla](https://wiki.openjdk.org/display/valhalla)** - Design documents and specifications
-- **[GitHub Discussions](https://github.com/Artagon/homebrew-jdkvalhalla/discussions)** - Ask questions about this tap
-
-### Experimental Features
-Remember that Valhalla builds include preview features requiring the `--enable-preview` flag:
 ```bash
-javac --enable-preview --release 27 YourCode.java
-java --enable-preview YourClass
+jenv versions
+jenv local <version>
+jenv global <version>
 ```
+
+If `java -version` does not follow the selected version, enable the export
+plugin and restart the shell:
+
+```bash
+jenv enable-plugin export
+```
+
+## Preview features
+
+Valhalla language and VM features require preview flags. Match `--release` to
+the installed JDK line:
+
+```bash
+javac --enable-preview --release 28 ValueDemo.java
+java --enable-preview ValueDemo
+```
+
+## Updates and validation
+
+The weekly update workflow reads only the official Valhalla page and
+`download.java.net` archives. It validates the release string, verifies the
+published SHA-256 value against each downloaded archive, and opens a pull
+request containing only the current versioned prebuilt formula and cask.
+
+Pull requests run Ruby syntax, Homebrew policy, contract, workflow, and
+prebuilt installation checks. Source formulas are not built in ordinary pull
+request validation because a Valhalla source build is intentionally
+long-running. Source bottle publication performs the full build and smoke test
+in a separate manual workflow.
+
+For local repository checks:
+
+```bash
+./scripts/test.sh
+```
+
+## Security and support
+
+Report sensitive issues through the repository's private security advisory
+form. See [SECURITY.md](SECURITY.md) for the source allowlist, checksum,
+workflow, and bottle publication controls.
+
+For non-sensitive defects or package requests, open a
+[GitHub issue](https://github.com/artagon/homebrew-jdkvalhalla/issues).
 
 ## License
 
-This tap is distributed under the same license as OpenJDK (GPL-2.0 with Classpath Exception).
-
-## Disclaimer
-
-These are early-access builds provided for testing and development purposes. They implement experimental features that are subject to change. They are not intended for production use. For production environments, please use stable JDK releases.
-
-**Important:** Project Valhalla builds include preview features that require the `--enable-preview` flag to use. The APIs and language features are subject to change in future releases.
-
-## Links
-
-- [Project Valhalla Downloads](https://jdk.java.net/valhalla/)
-- [JEP 401: Value Classes and Objects](https://openjdk.org/jeps/401)
-- [OpenJDK Project Valhalla](https://openjdk.org/projects/valhalla/)
-- [Project Valhalla Early Access](https://openjdk.org/projects/valhalla/early-access)
-- [Latest JEP 401 Specification](http://cr.openjdk.java.net/~dlsmith/jep401/latest)
-- [Valhalla API Documentation](https://download.java.net/java/early_access/valhalla/docs/api/)
-- [Homebrew Documentation](https://docs.brew.sh/)
+The tap is distributed under the same GPL-2.0 with Classpath Exception terms
+as the packaged OpenJDK builds. See [LICENSE](LICENSE).

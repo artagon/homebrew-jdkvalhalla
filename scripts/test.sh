@@ -10,6 +10,10 @@ FORMULA_NAME="jdkvalhalla@27"
 FORMULA_FULL="${TAP_USER}/jdkvalhalla/${FORMULA_NAME}"
 CASK_NAME="jdkvalhalla"
 CASK_FULL="${TAP_USER}/jdkvalhalla/${CASK_NAME}"
+PACKAGE_FILES=(
+  "${ROOT}"/Casks/*.rb
+  "${ROOT}"/Formula/*.rb
+)
 
 log() {
   printf '==> %s\n' "$*"
@@ -60,18 +64,36 @@ link_tap_to_repo() {
 
 run_style_and_audit() {
   log "Running brew style checks"
-  brew style "${ROOT}/Casks/${CASK_NAME}.rb"
-  brew style "${ROOT}/Formula/${FORMULA_NAME}.rb"
+  brew style "${PACKAGE_FILES[@]}"
 
-  log "Running brew audit for formula ${FORMULA_FULL}"
-  brew audit --formula "${FORMULA_FULL}"
+  local package token
+  for package in "${ROOT}"/Formula/*.rb; do
+    token="$(basename "${package}" .rb)"
+    log "Running brew audit for formula ${token}"
+    brew audit --formula "${TAP_USER}/jdkvalhalla/${token}"
+  done
 
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    log "Running brew audit for cask ${CASK_FULL}"
-    brew audit --cask "${CASK_FULL}"
+    for package in "${ROOT}"/Casks/*.rb; do
+      token="$(basename "${package}" .rb)"
+      log "Running brew audit for cask ${token}"
+      brew audit --cask "${TAP_USER}/jdkvalhalla/${token}"
+    done
   else
     log "Skipping cask audit on non-macOS host"
   fi
+}
+
+run_static_tests() {
+  command -v bats >/dev/null 2>&1 || abort "Bats is required to run the contract tests."
+
+  log "Running package and documentation contracts"
+  bats "${ROOT}/tests/formula_contract.bats" "${ROOT}/tests/documentation_contract.bats"
+
+  log "Running Ruby unit tests"
+  ruby "${ROOT}/tests/bottle_artifact_validator_test.rb"
+  ruby "${ROOT}/tests/parse_valhalla_release_test.rb"
+  ruby "${ROOT}/tests/workflow_security_test.rb"
 }
 
 test_formula_install() {
@@ -106,6 +128,7 @@ log "Linking tap ${TAP_FULL} to local repository"
 link_tap_to_repo
 
 run_style_and_audit
+run_static_tests
 test_formula_install
 test_cask_install
 

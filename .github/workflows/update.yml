@@ -3,376 +3,301 @@ name: Update Valhalla EA
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 12 * * 0'  # Weekly on Sundays at 12:00 UTC
+    - cron: '0 12 * * 0'
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 jobs:
-  update:
-    runs-on: ubuntu-latest
+  prepare:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.metadata.outputs.artifact_name }}
+      full_version: ${{ steps.release.outputs.full_version }}
+      jdk_version: ${{ steps.release.outputs.jdk_version }}
+      ea_tag: ${{ steps.release.outputs.ea_tag }}
+      build: ${{ steps.release.outputs.build }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Parse official Valhalla release
+        id: release
+        run: |
+          set -Eeuo pipefail
+          page_file="$(mktemp)"
+          trap 'rm -f -- "${page_file}"' EXIT
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 60 --retry 3 \
+            'https://jdk.java.net/valhalla/' \
+            --output "${page_file}"
+          ruby scripts/parse-valhalla-release.rb "${page_file}" "${GITHUB_OUTPUT}"
 
       - name: Cache JDK downloads
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: /tmp/jdk-cache
-          key: jdk-valhalla-${{ github.run_id }}
-          restore-keys: |
-            jdk-valhalla-
+          key: valhalla-${{ steps.release.outputs.full_version }}
 
-      - name: Fetch latest Valhalla EA
-        id: fetch
+      - name: Download and verify official archives
+        id: archives
+        env:
+          BUILD: ${{ steps.release.outputs.build }}
+          FULL_VERSION: ${{ steps.release.outputs.full_version }}
+          JDK_VERSION: ${{ steps.release.outputs.jdk_version }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          cache_dir="/tmp/jdk-cache"
+          mkdir -p "${cache_dir}"
+          base="https://download.java.net/java/early_access/valhalla/${JDK_VERSION}/${BUILD}"
 
-          page_file=$(mktemp)
-
-          # jdk.java.net/valhalla/ may require a browser-like user-agent
-          curl -fsSL -A "Mozilla/5.0" https://jdk.java.net/valhalla/ -o "$page_file"
-
-          # ---------------------------------------------------------------
-          # Parse version string from the page.
-          # Expected format on the page: "27-jep401ea3+1-1" (or similar)
-          # Components:
-          #   JDK_VERSION  = 27
-          #   EA_TAG       = jep401ea3
-          #   BUILD        = 1
-          #   FULL_VERSION = 27-jep401ea3+1-1
-          # Download URL pattern:
-          #   https://download.java.net/java/early_access/valhalla/{JDK_VERSION}/{BUILD}/openjdk-{FULL_VERSION}_PLATFORM_bin.tar.gz
-          # ---------------------------------------------------------------
-
-          # Extract the full version string (e.g. 27-jep401ea3+1-1)
-          FULL_VERSION=$(grep -oP '\d+-jep\d+ea\d+\+\d+-\d+' "$page_file" | head -1)
-          if [[ -z "$FULL_VERSION" ]]; then
-            echo "::error::Failed to extract version string from valhalla page"
-            cat "$page_file" | head -100
-            exit 1
-          fi
-          echo "Parsed version: $FULL_VERSION"
-
-          # Parse components
-          JDK_VERSION=$(echo "$FULL_VERSION" | grep -oP '^\d+')
-          EA_TAG=$(echo "$FULL_VERSION" | grep -oP '(?<=-)[a-z0-9]+(?=\+)')
-          BUILD=$(echo "$FULL_VERSION" | grep -oP '(?<=\+)\d+(?=-)')
-
-          if [[ -z "$JDK_VERSION" || -z "$EA_TAG" || -z "$BUILD" ]]; then
-            echo "::error::Failed to parse version components from: $FULL_VERSION"
-            echo "  JDK_VERSION=$JDK_VERSION EA_TAG=$EA_TAG BUILD=$BUILD"
-            exit 1
-          fi
-
-          echo "JDK version:  $JDK_VERSION"
-          echo "EA tag:       $EA_TAG"
-          echo "Build:        $BUILD"
-
-          # Build download URLs
-          BASE="https://download.java.net/java/early_access/valhalla/${JDK_VERSION}/${BUILD}"
-
-          URL_MAC_ARM="${BASE}/openjdk-${FULL_VERSION}_macos-aarch64_bin.tar.gz"
-          URL_MAC_INTEL="${BASE}/openjdk-${FULL_VERSION}_macos-x64_bin.tar.gz"
-          URL_LINUX_ARM="${BASE}/openjdk-${FULL_VERSION}_linux-aarch64_bin.tar.gz"
-          URL_LINUX_X64="${BASE}/openjdk-${FULL_VERSION}_linux-x64_bin.tar.gz"
-
-          # ------------------------------------------------------------------
-          # Fetch remote SHA256 checksums
-          # ------------------------------------------------------------------
-          fetch_sha() {
-            local url=$1
-            local label=$2
-            local sha
-            sha=$(curl -fsSL -A "Mozilla/5.0" "${url}.sha256" | awk '{print $1}')
-            if [[ -z "$sha" || ! "$sha" =~ ^[0-9a-f]{64}$ ]]; then
-              echo "::error::Invalid remote checksum for ${label}: '$sha'"
-              exit 1
-            fi
-            echo "$sha"
+          validate_url() {
+            ruby -ruri -e '
+              uri = URI.parse(ARGV.fetch(0))
+              valid = uri.is_a?(URI::HTTPS) &&
+                      uri.host == "download.java.net" &&
+                      uri.userinfo.nil? &&
+                      uri.query.nil? &&
+                      uri.fragment.nil? &&
+                      uri.path.start_with?("/java/early_access/valhalla/")
+              abort "invalid Valhalla archive URL" unless valid
+            ' "$1"
           }
 
-          SHA_MAC_ARM=$(fetch_sha "$URL_MAC_ARM" "macOS ARM")
-          SHA_MAC_INTEL=$(fetch_sha "$URL_MAC_INTEL" "macOS Intel")
-          SHA_LINUX_ARM=$(fetch_sha "$URL_LINUX_ARM" "Linux ARM")
-          SHA_LINUX_X64=$(fetch_sha "$URL_LINUX_X64" "Linux x64")
+          fetch_and_verify() {
+            local key="$1"
+            local platform="$2"
+            local url="${base}/openjdk-${FULL_VERSION}_${platform}_bin.tar.gz"
+            local checksum_text expected archive actual partial
+            validate_url "${url}"
+            checksum_text="$(curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 \
+              --connect-timeout 15 --max-time 60 --retry 3 \
+              "${url}.sha256")"
+            expected="${checksum_text%%[[:space:]]*}"
+            [[ "${expected}" =~ ^[0-9a-f]{64}$ ]] || {
+              printf 'Invalid checksum for %s\n' "${platform}" >&2
+              exit 1
+            }
 
-          # ------------------------------------------------------------------
-          # Download each tarball and independently verify checksum
-          # ------------------------------------------------------------------
-          verify_tarball() {
-            local url=$1
-            local expected=$2
-            local label=$3
-            local cache_dir="/tmp/jdk-cache"
-            local filename
-            filename=$(basename "$url")
-            local cached_file="${cache_dir}/${filename}"
-
-            mkdir -p "$cache_dir"
-
-            if [[ -f "$cached_file" ]]; then
-              local cached_sha
-              cached_sha=$(sha256sum "$cached_file" | awk '{print $1}')
-              if [[ "$cached_sha" == "$expected" ]]; then
-                echo "Using cached ${label} (checksum verified)"
-                return 0
-              else
-                echo "Cached ${label} checksum mismatch, re-downloading"
-                rm -f "$cached_file"
+            archive="${cache_dir}/$(basename "${url}")"
+            actual=""
+            if [[ -f "${archive}" ]]; then
+              actual="$(sha256sum "${archive}")"
+              actual="${actual%%[[:space:]]*}"
+            fi
+            if [[ "${actual}" != "${expected}" ]]; then
+              partial="${archive}.partial"
+              rm -f -- "${partial}"
+              curl --fail --silent --show-error --location \
+                --proto '=https' --tlsv1.2 \
+                --connect-timeout 15 --max-time 1800 --retry 3 \
+                "${url}" --output "${partial}"
+              actual="$(sha256sum "${partial}")"
+              actual="${actual%%[[:space:]]*}"
+              if [[ "${actual}" != "${expected}" ]]; then
+                rm -f -- "${partial}"
+                printf 'Checksum mismatch for %s\n' "${platform}" >&2
+                exit 1
               fi
+              mv -- "${partial}" "${archive}"
             fi
-
-            echo "Downloading ${label}..."
-            curl -fsSL -A "Mozilla/5.0" "$url" -o "$cached_file"
-            local actual
-            actual=$(sha256sum "$cached_file" | awk '{print $1}')
-            if [[ "$actual" != "$expected" ]]; then
-              echo "::error::SECURITY: Checksum mismatch for ${label}!"
-              echo "  Remote .sha256: $expected"
-              echo "  Computed:       $actual"
-              rm -f "$cached_file"
+            [[ "${actual}" == "${expected}" ]] || {
+              printf 'Checksum mismatch for %s\n' "${platform}" >&2
               exit 1
-            fi
-            echo "Downloaded and verified ${label}"
+            }
+
+            {
+              printf 'url_%s=%s\n' "${key}" "${url}"
+              printf 'sha_%s=%s\n' "${key}" "${expected}"
+            } >>"${GITHUB_OUTPUT}"
           }
 
-          verify_tarball "$URL_MAC_ARM"   "$SHA_MAC_ARM"   "macOS ARM"
-          verify_tarball "$URL_MAC_INTEL"  "$SHA_MAC_INTEL"  "macOS Intel"
-          verify_tarball "$URL_LINUX_ARM"  "$SHA_LINUX_ARM"  "Linux ARM"
-          verify_tarball "$URL_LINUX_X64"  "$SHA_LINUX_X64"  "Linux x64"
+          fetch_and_verify mac_arm macos-aarch64
+          fetch_and_verify mac_intel macos-x64
+          fetch_and_verify linux_arm linux-aarch64
+          fetch_and_verify linux_x64 linux-x64
 
-          rm -f "$page_file"
-
-          # Cask version format: "VERSION,BUILD"
-          CASK_VERSION="${FULL_VERSION},${BUILD}"
-
-          {
-            echo "full_version=$FULL_VERSION"
-            echo "jdk_version=$JDK_VERSION"
-            echo "ea_tag=$EA_TAG"
-            echo "build=$BUILD"
-            echo "cask_version=$CASK_VERSION"
-            echo "url_mac_arm=$URL_MAC_ARM"
-            echo "url_mac_intel=$URL_MAC_INTEL"
-            echo "url_linux_arm=$URL_LINUX_ARM"
-            echo "url_linux_x64=$URL_LINUX_X64"
-            echo "sha_mac_arm=$SHA_MAC_ARM"
-            echo "sha_mac_intel=$SHA_MAC_INTEL"
-            echo "sha_linux_arm=$SHA_LINUX_ARM"
-            echo "sha_linux_x64=$SHA_LINUX_X64"
-          } >>"$GITHUB_OUTPUT"
-
-      - name: Update formula and cask files
+      - name: Render formula and cask
         env:
-          FULL_VERSION: ${{ steps.fetch.outputs.full_version }}
-          JDK_VERSION: ${{ steps.fetch.outputs.jdk_version }}
-          EA_TAG: ${{ steps.fetch.outputs.ea_tag }}
-          BUILD: ${{ steps.fetch.outputs.build }}
-          CASK_VERSION: ${{ steps.fetch.outputs.cask_version }}
-          URL_MAC_ARM: ${{ steps.fetch.outputs.url_mac_arm }}
-          URL_MAC_INTEL: ${{ steps.fetch.outputs.url_mac_intel }}
-          URL_LINUX_ARM: ${{ steps.fetch.outputs.url_linux_arm }}
-          URL_LINUX_X64: ${{ steps.fetch.outputs.url_linux_x64 }}
-          SHA_MAC_ARM: ${{ steps.fetch.outputs.sha_mac_arm }}
-          SHA_MAC_INTEL: ${{ steps.fetch.outputs.sha_mac_intel }}
-          SHA_LINUX_ARM: ${{ steps.fetch.outputs.sha_linux_arm }}
-          SHA_LINUX_X64: ${{ steps.fetch.outputs.sha_linux_x64 }}
+          BUILD: ${{ steps.release.outputs.build }}
+          FULL_VERSION: ${{ steps.release.outputs.full_version }}
+          JDK_VERSION: ${{ steps.release.outputs.jdk_version }}
+          SHA_LINUX_ARM: ${{ steps.archives.outputs.sha_linux_arm }}
+          SHA_LINUX_X64: ${{ steps.archives.outputs.sha_linux_x64 }}
+          SHA_MAC_ARM: ${{ steps.archives.outputs.sha_mac_arm }}
+          SHA_MAC_INTEL: ${{ steps.archives.outputs.sha_mac_intel }}
+          URL_LINUX_ARM: ${{ steps.archives.outputs.url_linux_arm }}
+          URL_LINUX_X64: ${{ steps.archives.outputs.url_linux_x64 }}
+          URL_MAC_ARM: ${{ steps.archives.outputs.url_mac_arm }}
+          URL_MAC_INTEL: ${{ steps.archives.outputs.url_mac_intel }}
         run: |
-          set -euo pipefail
-          python3 <<'PY'
-          import os
-          import re
-          import shutil
-          from pathlib import Path
+          set -Eeuo pipefail
+          ruby <<'RUBY'
+          require "fileutils"
 
-          full_version = os.environ["FULL_VERSION"]
-          jdk_version  = os.environ["JDK_VERSION"]
-          ea_tag       = os.environ["EA_TAG"]
-          build        = os.environ["BUILD"]
-          cask_version = os.environ["CASK_VERSION"]
+          full_version = ENV.fetch("FULL_VERSION")
+          jdk_version = ENV.fetch("JDK_VERSION")
+          build = ENV.fetch("BUILD")
+          platforms = {
+            "macos-aarch64" => [ENV.fetch("URL_MAC_ARM"), ENV.fetch("SHA_MAC_ARM")],
+            "macos-x64" => [ENV.fetch("URL_MAC_INTEL"), ENV.fetch("SHA_MAC_INTEL")],
+            "linux-aarch64" => [ENV.fetch("URL_LINUX_ARM"), ENV.fetch("SHA_LINUX_ARM")],
+            "linux-x64" => [ENV.fetch("URL_LINUX_X64"), ENV.fetch("SHA_LINUX_X64")],
+          }
 
-          url_mac_arm   = os.environ["URL_MAC_ARM"]
-          url_mac_intel = os.environ["URL_MAC_INTEL"]
-          url_linux_arm = os.environ["URL_LINUX_ARM"]
-          url_linux_x64 = os.environ["URL_LINUX_X64"]
+          template = Dir["Formula/jdkvalhalla@*.rb"].max_by do |path|
+            match = File.basename(path).match(/\Ajdkvalhalla@(\d+)\.rb\z/)
+            abort "invalid prebuilt formula template path: #{path}" unless match
+            Integer(match[1], 10)
+          end
+          abort "no prebuilt formula template" unless template
+          formula = File.read(template)
+          replacements = {
+            /^class \w+ < Formula$/ => "class JdkvalhallaAT#{jdk_version} < Formula",
+            /Project Valhalla JDK \d+/ => "Project Valhalla JDK #{jdk_version}",
+            /version "[^"]+"/ => "version \"#{full_version}\"",
+            /"--release", "\d+"/ => "\"--release\", \"#{jdk_version}\"",
+            %r{assert_match\(/\d+/,} => "assert_match(/#{jdk_version}/,",
+          }
+          replacements.each do |pattern, replacement|
+            abort "formula template pattern missing: #{pattern}" unless formula.match?(pattern)
+            formula = formula.sub(pattern, replacement)
+          end
+          platforms.each do |platform, (url, sha)|
+            pattern = %r{url "https://download\.java\.net/java/early_access/valhalla/[^"]+_#{Regexp.escape(platform)}_bin\.tar\.gz"\n(\s+)sha256 "[0-9a-f]{64}"}
+            replacement = "url \"#{url}\"\n\\1sha256 \"#{sha}\""
+            abort "formula platform pattern missing: #{platform}" unless formula.match?(pattern)
+            formula = formula.sub(pattern, replacement)
+          end
 
-          sha_mac_arm   = os.environ["SHA_MAC_ARM"]
-          sha_mac_intel = os.environ["SHA_MAC_INTEL"]
-          sha_linux_arm = os.environ["SHA_LINUX_ARM"]
-          sha_linux_x64 = os.environ["SHA_LINUX_X64"]
-
-          # ================================================================
-          # Update or create Formula/jdkvalhalla@{JDK_VERSION}.rb
-          # ================================================================
-          formula_path = Path(f"Formula/jdkvalhalla@{jdk_version}.rb")
-
-          # Check for any existing formula files to use as a template
-          existing_formulas = sorted(Path("Formula").glob("jdkvalhalla@*.rb"))
-
-          if formula_path.exists():
-              formula_text = formula_path.read_text()
-          elif existing_formulas:
-              # Use most recent existing formula as template
-              template = existing_formulas[-1]
-              formula_text = template.read_text()
-              print(f"Creating new formula from template: {template}")
-          else:
-              raise SystemExit(f"No existing formula found to use as template")
-
-          # Update class name to match the versioned formula
-          class_name = f"JdkvalhallaAT{jdk_version}"
-          formula_text = re.sub(
-              r'^class \w+ < Formula',
-              f'class {class_name} < Formula',
-              formula_text,
-              count=1,
-              flags=re.MULTILINE,
+          cask = File.read("Casks/jdkvalhalla.rb")
+          cask_version_pattern = /version "[^"]+"/
+          cask_checksum_pattern = /sha256 arm:\s+"[0-9a-f]{64}",\n\s*intel:\s+"[0-9a-f]{64}"/
+          cask_url_pattern = %r{url "https://download\.java\.net/java/early_access/valhalla/\d+/\#\{version\.csv\.second\}/openjdk-\#\{version\.csv\.first\}_macos-\#\{arch\}_bin\.tar\.gz"}
+          abort "cask version pattern missing" unless cask.match?(cask_version_pattern)
+          abort "cask checksum pattern missing" unless cask.match?(cask_checksum_pattern)
+          abort "cask URL pattern missing" unless cask.match?(cask_url_pattern)
+          cask = cask.sub(cask_version_pattern, "version \"#{full_version},#{build}\"")
+          cask = cask.sub(
+            cask_checksum_pattern,
+            "sha256 arm:   \"#{ENV.fetch("SHA_MAC_ARM")}\",\n" \
+            "         intel: \"#{ENV.fetch("SHA_MAC_INTEL")}\"",
+          )
+          cask = cask.sub(
+            cask_url_pattern,
+            "url \"https://download.java.net/java/early_access/valhalla/#{jdk_version}/" \
+            "\#{version.csv.second}/openjdk-\#{version.csv.first}_macos-\#{arch}_bin.tar.gz\"",
           )
 
-          # Update version
-          formula_text = re.sub(
-              r'version "[^"]+"',
-              f'version "{full_version}"',
-              formula_text,
-              count=1,
-          )
+          output_formula = "generated/Formula/jdkvalhalla@#{jdk_version}.rb"
+          output_cask = "generated/Casks/jdkvalhalla.rb"
+          FileUtils.mkdir_p(File.dirname(output_formula))
+          FileUtils.mkdir_p(File.dirname(output_cask))
+          File.write(output_formula, formula)
+          File.write(output_cask, cask)
+          RUBY
 
-          # Update all download URLs (macOS ARM, macOS Intel, Linux ARM, Linux x64)
-          url_replacements = [
-              (r'https://download\.java\.net/java/early_access/valhalla/\d+/\d+/openjdk-[^"]*_macos-aarch64_bin\.tar\.gz', url_mac_arm),
-              (r'https://download\.java\.net/java/early_access/valhalla/\d+/\d+/openjdk-[^"]*_macos-x64_bin\.tar\.gz', url_mac_intel),
-              (r'https://download\.java\.net/java/early_access/valhalla/\d+/\d+/openjdk-[^"]*_linux-aarch64_bin\.tar\.gz', url_linux_arm),
-              (r'https://download\.java\.net/java/early_access/valhalla/\d+/\d+/openjdk-[^"]*_linux-x64_bin\.tar\.gz', url_linux_x64),
-          ]
-
-          for pattern, replacement in url_replacements:
-              formula_text, n = re.subn(pattern, replacement, formula_text, count=1)
-              if n != 1:
-                  raise SystemExit(f"Failed to update formula URL for pattern: {pattern}")
-
-          # Update SHA256 checksums (in order: mac arm, mac intel, linux arm, linux x64)
-          sha_values = [sha_mac_arm, sha_mac_intel, sha_linux_arm, sha_linux_x64]
-          for sha in sha_values:
-              formula_text, n = re.subn(
-                  r'sha256 "[0-9a-f]{64}"',
-                  f'sha256 "{sha}"',
-                  formula_text,
-                  count=1,
-              )
-              if n != 1:
-                  raise SystemExit("Failed to update a formula checksum")
-
-          # Update the test block
-          formula_text = re.sub(
-              r'--release", "\d+"',
-              f'--release", "{jdk_version}"',
-              formula_text,
-              count=1,
-          )
-          formula_text = re.sub(
-              r'assert_equal "hi\\n", shell_output\("#{bin}/java --enable-preview Hello"\)\n\s*assert_match\(/\d+/, shell_output\("#{bin}/java --version 2>&1"\)\)',
-              f'assert_equal "hi\\n", shell_output("#{{bin}}/java --enable-preview Hello")\n    assert_match(/{jdk_version}/, shell_output("#{{bin}}/java --version 2>&1"))',
-              formula_text,
-              count=1,
-          )
-
-          formula_path.write_text(formula_text)
-          print(f"Updated {formula_path}")
-
-          # ================================================================
-          # Update Casks/jdkvalhalla.rb
-          # ================================================================
-          cask_path = Path("Casks/jdkvalhalla.rb")
-          cask_text = cask_path.read_text()
-
-          # Update version
-          cask_text, n = re.subn(
-              r'version "[^"]+"',
-              f'version "{cask_version}"',
-              cask_text,
-              count=1,
-          )
-          if n != 1:
-              raise SystemExit("Failed to update cask version")
-
-          # Update SHA256 checksums
-          cask_text, n = re.subn(
-              r'sha256 arm:\s+"[0-9a-f]{64}",\s*\n\s*intel:\s+"[0-9a-f]{64}"',
-              f'sha256 arm:   "{sha_mac_arm}",\n         intel: "{sha_mac_intel}"',
-              cask_text,
-              count=1,
-          )
-          if n != 1:
-              raise SystemExit("Failed to update cask checksums")
-
-          # Update URL major version directory
-          cask_text = re.sub(
-              r'(https://download\.java\.net/java/early_access/valhalla/)\d+/',
-              rf'\g<1>{jdk_version}/',
-              cask_text,
-          )
-
-          cask_path.write_text(cask_text)
-          print(f"Updated {cask_path}")
-
-          # ================================================================
-          # Summary
-          # ================================================================
-          print(f"\nVersion:     {full_version}")
-          print(f"JDK:         {jdk_version}")
-          print(f"EA tag:      {ea_tag}")
-          print(f"Build:       {build}")
-          print(f"Formula:     {formula_path}")
-          print(f"Cask:        {cask_path}")
-          PY
-
-      - name: Validate Ruby syntax
+      - name: Validate generated packages
         env:
-          JDK_VERSION: ${{ steps.fetch.outputs.jdk_version }}
+          JDK_VERSION: ${{ steps.release.outputs.jdk_version }}
         run: |
-          set -euo pipefail
-          ruby -c "Formula/jdkvalhalla@${JDK_VERSION}.rb"
-          ruby -c Casks/jdkvalhalla.rb
+          set -Eeuo pipefail
+          ruby -c "generated/Formula/jdkvalhalla@${JDK_VERSION}.rb"
+          ruby -c generated/Casks/jdkvalhalla.rb
 
-      - name: Create Pull Request
-        uses: peter-evans/create-pull-request@271a8d0340265f705b14b6d32b9829c1cb33d45e # v7.0.8
+      - name: Resolve artifact metadata
+        id: metadata
+        env:
+          FULL_VERSION: ${{ steps.release.outputs.full_version }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          artifact_name="prebuilt-${FULL_VERSION}-${GITHUB_SHA::12}"
+          printf 'artifact_name=%s\n' "${artifact_name}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload generated packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore: update Valhalla EA to ${{ steps.fetch.outputs.full_version }}"
-          title: "chore: update Valhalla EA to ${{ steps.fetch.outputs.full_version }}"
+          name: ${{ steps.metadata.outputs.artifact_name }}
+          path: |-
+            generated/Casks/jdkvalhalla.rb
+            generated/Formula/jdkvalhalla@${{ steps.release.outputs.jdk_version }}.rb
+          if-no-files-found: error
+          retention-days: 1
+
+  create-pr:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download generated packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.prepare.outputs.artifact_name }}
+          path: generated
+
+      - name: Validate exact generated paths
+        env:
+          JDK_VERSION: ${{ needs.prepare.outputs.jdk_version }}
+        run: |
+          set -Eeuo pipefail
+          ruby -e '
+            root = File.realpath("generated")
+            expected = [
+              File.join(root, "Casks", "jdkvalhalla.rb"),
+              File.join(root, "Formula", "jdkvalhalla@#{ENV.fetch("JDK_VERSION")}.rb"),
+            ].sort
+            actual = Dir.glob(File.join(root, "**", "*"), File::FNM_DOTMATCH).select do |path|
+              File.file?(path) || File.symlink?(path)
+            end.sort
+            abort "generated package allowlist mismatch" unless actual == expected
+            abort "generated package must not be a symlink" if actual.any? { |path| File.symlink?(path) }
+          '
+          ruby -c "generated/Formula/jdkvalhalla@${JDK_VERSION}.rb"
+          ruby -c generated/Casks/jdkvalhalla.rb
+          cp "generated/Formula/jdkvalhalla@${JDK_VERSION}.rb" Formula/
+          cp generated/Casks/jdkvalhalla.rb Casks/
+
+      - name: Create update pull request
+        id: create-pull-request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ github.token }}
+          commit-message: "chore: update Valhalla EA to ${{ needs.prepare.outputs.full_version }}"
+          title: "chore: update Valhalla EA to ${{ needs.prepare.outputs.full_version }}"
           body: |
-            ## Automated Update
+            Updates the official Project Valhalla early-access binaries to
+            `${{ needs.prepare.outputs.full_version }}`.
 
-            Updates Project Valhalla EA to version `${{ steps.fetch.outputs.full_version }}`.
+            - JDK line: `${{ needs.prepare.outputs.jdk_version }}`
+            - EA tag: `${{ needs.prepare.outputs.ea_tag }}`
+            - Build: `${{ needs.prepare.outputs.build }}`
 
-            ### Details
-            - **JDK version:** ${{ steps.fetch.outputs.jdk_version }}
-            - **EA tag:** ${{ steps.fetch.outputs.ea_tag }}
-            - **Build:** ${{ steps.fetch.outputs.build }}
-            - **Formula:** `Formula/jdkvalhalla@${{ steps.fetch.outputs.jdk_version }}.rb`
-            - **Cask:** `Casks/jdkvalhalla.rb`
-
-            ### Download URLs
-            - macOS ARM64: ${{ steps.fetch.outputs.url_mac_arm }}
-            - macOS x64: ${{ steps.fetch.outputs.url_mac_intel }}
-            - Linux ARM64: ${{ steps.fetch.outputs.url_linux_arm }}
-            - Linux x64: ${{ steps.fetch.outputs.url_linux_x64 }}
-
-            ### SHA256 Checksums (independently verified)
-            - macOS ARM64: `${{ steps.fetch.outputs.sha_mac_arm }}`
-            - macOS x64: `${{ steps.fetch.outputs.sha_mac_intel }}`
-            - Linux ARM64: `${{ steps.fetch.outputs.sha_linux_arm }}`
-            - Linux x64: `${{ steps.fetch.outputs.sha_linux_x64 }}`
-
-            ### Source
-            https://jdk.java.net/valhalla/
-
-            ---
-            *This PR was automatically created by the update workflow.*
-            *All checksums were independently verified by downloading tarballs and computing sha256sum.*
-          branch: update/valhalla-${{ steps.fetch.outputs.full_version }}
+            The workflow parsed the official release page, constrained every
+            archive URL to `download.java.net`, verified each published
+            checksum against the downloaded archive, and transferred only the
+            versioned formula and rolling cask into this job.
+          branch: update/valhalla-${{ needs.prepare.outputs.full_version }}
           delete-branch: true
-          labels: |
-            automated
-            update
+          add-paths: |-
+            Casks/jdkvalhalla.rb
+            Formula/jdkvalhalla@${{ needs.prepare.outputs.jdk_version }}.rb
+
+      - name: Dispatch validation
+        if: ${{ steps.create-pull-request.outputs.pull-request-number != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_REF: ${{ steps.create-pull-request.outputs.pull-request-branch }}
+        run: gh workflow run validate.yml --ref "${VALIDATION_REF}"
